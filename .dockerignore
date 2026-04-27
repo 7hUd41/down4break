@@ -1,0 +1,12 @@
+# Build artifacts et local junk : on ne les met pas dans le contexte build.
+node_modules
+.next
+.git
+.gitignore
+.dockerignore
+Dockerfile
+.env*
+npm-debug.log*
+.DS_Store
+README.md
+coverage
