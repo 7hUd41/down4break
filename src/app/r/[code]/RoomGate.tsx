@@ -3,27 +3,30 @@
 // Vérifie si l'utilisateur a déjà un antId pour cette room (localStorage).
 // Si oui : affiche RoomView. Sinon : affiche JoinRoomForm.
 //
-// On stocke `antId` par room dans localStorage : clé `down4break:ant:<CODE>`.
-// On lit le storage via useSyncExternalStore (pattern React 19 recommandé
-// pour les sources externes) — ça évite les setState-dans-effect et le
-// hydration mismatch en gérant proprement le snapshot serveur.
+// Storage key : `down4break:ant:<CODE>`.
+//
+// On lit le storage via useSyncExternalStore (pattern React 19 propre, sans
+// hydration mismatch). Le state local `overrideId` propage le résultat d'un
+// join sans avoir à recharger ; le state `forcedOut` permet d'invalider
+// immédiatement l'antId stocké quand l'user clique "changer de pseudo"
+// (sinon useSyncExternalStore re-lirait l'ancien id avant qu'il ne soit
+// effacé du localStorage).
 
 import { useCallback, useState, useSyncExternalStore } from "react";
 import RoomView from "@/components/RoomView";
 import JoinRoomForm from "@/components/JoinRoomForm";
+import { leaveAnt } from "@/lib/api";
 import type { Ant } from "@/lib/types";
 
 const storageKey = (code: string) => `down4break:ant:${code}`;
 
-// Pas d'abonnement nécessaire : la valeur ne change qu'au join, et on
-// rafraîchit alors via setState locale.
 function noopSubscribe(): () => void {
   return () => {};
 }
 
 export default function RoomGate({ code }: { code: string }) {
-  // Tampon local pour propager le résultat d'un join sans recharger.
   const [overrideId, setOverrideId] = useState<string | null>(null);
+  const [forcedOut, setForcedOut] = useState(false);
 
   const getStoredId = useCallback((): string | null => {
     try {
@@ -36,10 +39,10 @@ export default function RoomGate({ code }: { code: string }) {
   const storedId = useSyncExternalStore(
     noopSubscribe,
     getStoredId,
-    () => null // côté serveur : on ne sait rien -> rendu = JoinForm
+    () => null
   );
 
-  const antId = overrideId ?? storedId;
+  const antId = forcedOut ? null : (overrideId ?? storedId);
 
   function onJoined(ant: Ant) {
     try {
@@ -47,12 +50,27 @@ export default function RoomGate({ code }: { code: string }) {
     } catch {
       /* private mode : on garde juste en mémoire */
     }
+    setForcedOut(false);
     setOverrideId(ant.id);
+  }
+
+  async function onLeave(currentId: string) {
+    // Best-effort backend : on supprime l'ant côté serveur (permet aux autres
+    // de voir sa disparition immédiate via SSE plutôt que d'attendre la purge
+    // de 60s). Si le call échoue on continue, l'ant disparaîtra naturellement.
+    leaveAnt(currentId).catch(() => {});
+    try {
+      localStorage.removeItem(storageKey(code));
+    } catch {
+      /* idem private mode */
+    }
+    setOverrideId(null);
+    setForcedOut(true);
   }
 
   if (!antId) {
     return <JoinRoomForm code={code} onJoined={onJoined} />;
   }
 
-  return <RoomView code={code} meId={antId} />;
+  return <RoomView code={code} meId={antId} onLeave={() => onLeave(antId)} />;
 }

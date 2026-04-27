@@ -20,6 +20,7 @@ export interface Ant {
 
 export interface Room {
   code: string;          // Court, lisible, partagé verbalement.
+  name?: string;         // Nom humain optionnel choisi à la création (max 60 chars).
   createdAt: number;
 }
 

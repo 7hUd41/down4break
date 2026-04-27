@@ -1,33 +1,47 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { sendAction, sendHeartbeat, subscribeRoom, fetchRoomState } from "@/lib/api";
 import type { Ant, RoomState } from "@/lib/types";
+import ShareButton from "@/components/ShareButton";
 
 interface Props {
   code: string;
   meId: string;          // id du ant local
   initialState?: RoomState;
+  onLeave?: () => void;  // appelé par le bouton "changer de pseudo"
 }
 
-export default function RoomView({ code, meId, initialState }: Props) {
+export default function RoomView({ code, meId, initialState, onLeave }: Props) {
   const [state, setState] = useState<RoomState | null>(initialState ?? null);
   const [now, setNow] = useState(() => Date.now());
-  // Drift entre l'horloge serveur et celle du client. On le met en *state*
-  // (pas en ref) parce qu'il est lu pendant le render — accéder à un ref
-  // pendant le render est interdit en React 19 strict.
+  // Drift entre l'horloge serveur et celle du client (en ms). En state plutôt
+  // qu'en ref parce que lu pendant le render.
   const [drift, setDrift] = useState(0);
-
   // Re-render chaque seconde pour faire avancer les compteurs locaux.
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
+  // URL absolue de la room pour le partage. Lue via useSyncExternalStore
+  // pour rester propre côté React 19 (pas de setState dans un effect, et
+  // pas de hydration mismatch puisqu'on déclare explicitement la valeur server).
+  const getShareUrl = useCallback(
+    () => `${window.location.origin}/r/${code}`,
+    [code]
+  );
+  const shareUrl = useSyncExternalStore(
+    () => () => {},  // pas d'abonnement : window.location.origin est constant pendant la vie du tab
+    getShareUrl,
+    () => ""         // côté serveur : pas d'URL absolue, on rend rien (le bouton est masqué)
+  );
+
   // SSE.
   useEffect(() => {
     let mounted = true;
-    // fallback : si la SSE ne monte pas, on fait au moins un fetch initial
     fetchRoomState(code).then((s) => {
       if (!mounted) return;
       setState(s);
@@ -62,17 +76,50 @@ export default function RoomView({ code, meId, initialState }: Props) {
   }
 
   const serverNow = now + drift;
+  const roomName = state.room.name;
 
   return (
-    <main className="flex-1 w-full max-w-3xl mx-auto px-6 py-10 flex flex-col gap-10">
-      <header className="flex items-baseline justify-between">
-        <div>
-          <p className="text-xs text-muted uppercase tracking-wider">room</p>
-          <h1 className="text-2xl font-mono tracking-widest">{code}</h1>
+    <main className="flex-1 w-full max-w-3xl mx-auto px-6 py-8 flex flex-col gap-10">
+      <header className="flex items-start justify-between gap-4">
+        <div className="flex items-center gap-3">
+          {/* Petit logo cliquable qui ramène à la home */}
+          <Link href="/" className="shrink-0 hover:opacity-80 transition" aria-label="retour à l'accueil">
+            <Image src="/logo.png" alt="" width={48} height={48} className="object-contain" />
+          </Link>
+          <div className="min-w-0">
+            <p className="text-xs text-muted uppercase tracking-wider">room</p>
+            {roomName ? (
+              <>
+                <h1 className="text-xl sm:text-2xl font-semibold truncate">{roomName}</h1>
+                <p className="text-xs font-mono text-muted tracking-widest mt-0.5">{code}</p>
+              </>
+            ) : (
+              <h1 className="text-xl sm:text-2xl font-mono tracking-widest">{code}</h1>
+            )}
+          </div>
         </div>
-        <p className="text-xs text-muted">
-          {state.ants.length} {state.ants.length > 1 ? "antz" : "ant"}
-        </p>
+        <div className="flex flex-col items-end gap-2">
+          <p className="text-xs text-muted">
+            {state.ants.length} {state.ants.length > 1 ? "antz" : "ant"}
+          </p>
+          {shareUrl && (
+            <ShareButton
+              url={shareUrl}
+              title={roomName ? `${roomName} · down4break?` : `room ${code} · down4break?`}
+              text={`Rejoins-moi sur down4break? — code ${code}`}
+            />
+          )}
+          {onLeave && (
+            <button
+              type="button"
+              onClick={onLeave}
+              className="text-xs text-muted hover:text-foreground underline underline-offset-4 transition"
+              title="quitter et rejoindre sous un autre pseudo"
+            >
+              changer de pseudo
+            </button>
+          )}
+        </div>
       </header>
 
       {me && <MyTimer ant={me} serverNow={serverNow} />}
@@ -160,7 +207,7 @@ function MyTimer({ ant, serverNow }: { ant: Ant; serverNow: number }) {
 function AntRow({ ant, serverNow }: { ant: Ant; serverNow: number }) {
   const remaining = computeRemainingMs(ant, serverNow);
   return (
-    <li className="flex items-center gap-4 px-4 py-3 rounded-lg border border-border bg-card">
+    <li className="flex items-center gap-4 px-4 py-3 rounded-xl border border-border bg-card">
       <PhaseDot status={ant.status} />
       <div className="flex-1 min-w-0">
         <p className="font-medium truncate">{ant.name}</p>
@@ -191,7 +238,7 @@ function Btn({
       onClick={onClick}
       disabled={disabled}
       className={
-        "px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-40 " +
+        "px-4 py-2 rounded-xl text-sm font-medium transition disabled:opacity-40 " +
         (primary
           ? "bg-foreground text-background hover:opacity-90"
           : "border border-border bg-card hover:border-accent")

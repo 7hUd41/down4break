@@ -11,6 +11,10 @@ import type { Ant, Room, RoomState, AntStatus } from "./types";
 
 interface StoreShape {
   rooms: Map<string, Room>;
+  // Index secondaire pour résoudre une room par son nom humain (lowercased + trimmed).
+  // Permet à deux personnes qui tapent "team marketing" indépendamment de tomber
+  // sur la même room, sans avoir à se passer le code 4 chars.
+  roomsByName: Map<string, string>;  // nameKey -> code
   ants: Map<string, Ant>;            // id -> Ant
   antsByRoom: Map<string, Set<string>>; // roomCode -> ant ids
   // Bus pub/sub très simple pour notifier les SSE quand une room change.
@@ -23,12 +27,20 @@ function getStore(): StoreShape {
   if (!g.__down4break_store) {
     g.__down4break_store = {
       rooms: new Map(),
+      roomsByName: new Map(),
       ants: new Map(),
       antsByRoom: new Map(),
       listeners: new Map(),
     };
   }
-  return g.__down4break_store;
+  const store = g.__down4break_store;
+  // Migration HMR-safe : quand on ajoute un champ au store entre deux saves
+  // pendant `next dev`, l'objet en mémoire (préservé via globalThis pour
+  // survivre au HMR) garde son ancienne shape. On initialise ici pour ne
+  // pas crasher avec "Cannot read properties of undefined".
+  // À chaque nouveau champ ajouté ci-dessus, ajouter la ligne défensive ici.
+  if (!store.roomsByName) store.roomsByName = new Map();
+  return store;
 }
 
 // --- Helpers ---------------------------------------------------------------
@@ -41,6 +53,19 @@ function generateRoomCode(): string {
     code += ROOM_ALPHABET[Math.floor(Math.random() * ROOM_ALPHABET.length)];
   }
   return code;
+}
+
+// Normalisation du nom pour le lookup : trim + lowercase + collapse whitespace.
+// Pas de slug agressif (on garde les accents, espaces, etc.) — on veut juste
+// que "Team Marketing" et "team  marketing" pointent au même endroit.
+function nameKey(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Est-ce que l'input ressemble à un code (4 chars de notre alphabet) ?
+const CODE_REGEX = new RegExp(`^[${ROOM_ALPHABET}]{4}$`, "i");
+function isCodeShape(input: string): boolean {
+  return CODE_REGEX.test(input.trim());
 }
 
 function notify(roomCode: string) {
@@ -59,16 +84,26 @@ function notify(roomCode: string) {
 
 // --- Rooms -----------------------------------------------------------------
 
-export function createRoom(): Room {
+export function createRoom(name?: string): Room {
   const store = getStore();
   // Anti-collision : on retente quelques fois si le code existe déjà.
   let code = generateRoomCode();
   for (let i = 0; i < 5 && store.rooms.has(code); i++) {
     code = generateRoomCode();
   }
-  const room: Room = { code, createdAt: Date.now() };
+  // Nettoyage du nom : trim + cap à 60 caractères pour rester lisible
+  // dans une preview WhatsApp ou un titre d'onglet.
+  const cleanName = typeof name === "string" ? name.trim().slice(0, 60) : "";
+  const room: Room = {
+    code,
+    createdAt: Date.now(),
+    ...(cleanName ? { name: cleanName } : {}),
+  };
   store.rooms.set(code, room);
   store.antsByRoom.set(code, new Set());
+  if (cleanName) {
+    store.roomsByName.set(nameKey(cleanName), code);
+  }
   return room;
 }
 
@@ -77,10 +112,44 @@ export function getOrCreateRoom(code: string): Room {
   const upper = code.toUpperCase();
   const existing = store.rooms.get(upper);
   if (existing) return existing;
+  // On crée une room sans nom — elle a juste été visitée par code.
+  // Si quelqu'un veut lui donner un nom plus tard, on ajoutera une méthode dédiée.
   const room: Room = { code: upper, createdAt: Date.now() };
   store.rooms.set(upper, room);
   store.antsByRoom.set(upper, new Set());
   return room;
+}
+
+// Résout l'input du formulaire d'accueil :
+//  - si l'input ressemble à un code (4 chars de notre alphabet) → get-or-create par code
+//  - sinon, on traite comme un nom humain :
+//     - on cherche une room existante avec ce nameKey
+//     - sinon on en crée une nouvelle (code aléatoire) avec ce nom
+// Renvoie aussi `created` pour que le client puisse afficher un toast/log si besoin.
+export function resolveRoom(input: string): { room: Room; created: boolean } {
+  const store = getStore();
+  const trimmed = input.trim();
+
+  if (isCodeShape(trimmed)) {
+    const upper = trimmed.toUpperCase();
+    const existing = store.rooms.get(upper);
+    if (existing) return { room: existing, created: false };
+    const room = getOrCreateRoom(upper);
+    return { room, created: true };
+  }
+
+  // Sinon : c'est un nom humain.
+  const key = nameKey(trimmed);
+  const existingCode = store.roomsByName.get(key);
+  if (existingCode) {
+    const existing = store.rooms.get(existingCode);
+    if (existing) return { room: existing, created: false };
+    // Index pourri (room supprimée, key orpheline) → on nettoie et on continue.
+    store.roomsByName.delete(key);
+  }
+
+  const room = createRoom(trimmed);
+  return { room, created: true };
 }
 
 export function getRoom(code: string): Room | undefined {
@@ -129,6 +198,22 @@ export function heartbeat(id: string): Ant | undefined {
   ant.lastSeen = Date.now();
   // Pas de notify ici : un heartbeat seul ne change pas l'état visible.
   return ant;
+}
+
+// --- Leave (déco) ----------------------------------------------------------
+
+// Retire un ant de la room : utilisé quand l'utilisateur clique "changer de
+// pseudo". On supprime aussi son id de l'index antsByRoom et on notifie la
+// room pour que les autres voient sa disparition immédiatement (sans attendre
+// le timeout de 60s du heartbeat).
+export function leaveAnt(id: string): boolean {
+  const store = getStore();
+  const ant = store.ants.get(id);
+  if (!ant) return false;
+  store.ants.delete(id);
+  store.antsByRoom.get(ant.roomCode)?.delete(id);
+  notify(ant.roomCode);
+  return true;
 }
 
 // --- Actions sur le timer --------------------------------------------------
@@ -241,6 +326,46 @@ export function getRoomState(code: string): RoomState | undefined {
   // tri stable par join time
   ants.sort((a, b) => a.joinedAt - b.joinedAt);
   return { room, ants, serverNow: now };
+}
+
+// --- Liste publique des rooms ----------------------------------------------
+// Les rooms "publiques" = celles avec un nom humain ET au moins un ant
+// récemment actif. Les rooms créées par code seul (sans nom) restent
+// invisibles — le code 4 chars est leur seul moyen d'accès, ce qui les rend
+// privées par construction.
+
+export interface PublicRoomEntry {
+  code: string;
+  name: string;
+  antCount: number;
+  // Dernière activité observée dans la room (max des lastSeen). Utilisable
+  // pour trier "rooms les plus vivantes en premier" côté client.
+  lastSeen: number;
+}
+
+export function listPublicRooms(): PublicRoomEntry[] {
+  const store = getStore();
+  const now = Date.now();
+  const out: PublicRoomEntry[] = [];
+  for (const room of store.rooms.values()) {
+    if (!room.name) continue;
+    const ids = store.antsByRoom.get(room.code);
+    if (!ids || ids.size === 0) continue;
+    let antCount = 0;
+    let lastSeen = 0;
+    for (const id of ids) {
+      const ant = store.ants.get(id);
+      if (!ant) continue;
+      if (now - ant.lastSeen > STALE_MS) continue; // skip stale (cohérent avec getRoomState)
+      antCount++;
+      if (ant.lastSeen > lastSeen) lastSeen = ant.lastSeen;
+    }
+    if (antCount === 0) continue;
+    out.push({ code: room.code, name: room.name, antCount, lastSeen });
+  }
+  // Plus actives d'abord, à égalité par nom alpha pour rester stable visuellement.
+  out.sort((a, b) => b.lastSeen - a.lastSeen || a.name.localeCompare(b.name));
+  return out;
 }
 
 // --- Pub/sub pour SSE ------------------------------------------------------
