@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { Ant, Room, RoomState, AntStatus } from "./types";
+import type { Ant, Room, RoomState, AntStatus, SessionMode } from "./types";
+import { generateRoomName } from "./roomName";
+import { inferEmojiFromName, DEFAULT_EMOJI, EMOJI_OPTIONS } from "./emoji";
 
 // --- In-memory store -------------------------------------------------------
 // Single-process Next.js dev/prod : une Map suffit. Pour passer en distribué
@@ -93,17 +95,19 @@ export function createRoom(name?: string): Room {
   }
   // Nettoyage du nom : trim + cap à 60 caractères pour rester lisible
   // dans une preview WhatsApp ou un titre d'onglet.
-  const cleanName = typeof name === "string" ? name.trim().slice(0, 60) : "";
+  // Si pas de nom fourni → auto-génération style "ruche_paisible". Toute room
+  // a donc TOUJOURS un nom humain : ça la rend visible dans le RoomBrowser et
+  // ça donne au code 4 chars son rôle final = identifiant secondaire pour le share.
+  let cleanName = typeof name === "string" ? name.trim().slice(0, 60) : "";
+  if (!cleanName) cleanName = generateRoomName();
   const room: Room = {
     code,
     createdAt: Date.now(),
-    ...(cleanName ? { name: cleanName } : {}),
+    name: cleanName,
   };
   store.rooms.set(code, room);
   store.antsByRoom.set(code, new Set());
-  if (cleanName) {
-    store.roomsByName.set(nameKey(cleanName), code);
-  }
+  store.roomsByName.set(nameKey(cleanName), code);
   return room;
 }
 
@@ -112,11 +116,18 @@ export function getOrCreateRoom(code: string): Room {
   const upper = code.toUpperCase();
   const existing = store.rooms.get(upper);
   if (existing) return existing;
-  // On crée une room sans nom — elle a juste été visitée par code.
-  // Si quelqu'un veut lui donner un nom plus tard, on ajoutera une méthode dédiée.
-  const room: Room = { code: upper, createdAt: Date.now() };
+  // Auto-génère un nom humain pour rester visible dans le RoomBrowser. Si
+  // par malchance le nom collisionne avec une room existante, on retire la
+  // collision en re-tirant — la cardinalité PLACES×VIBES est largement assez
+  // grande pour rendre ça négligeable, mais on protège quand même.
+  let name = generateRoomName();
+  for (let i = 0; i < 5 && store.roomsByName.has(nameKey(name)); i++) {
+    name = generateRoomName();
+  }
+  const room: Room = { code: upper, createdAt: Date.now(), name };
   store.rooms.set(upper, room);
   store.antsByRoom.set(upper, new Set());
+  store.roomsByName.set(nameKey(name), upper);
   return room;
 }
 
@@ -163,9 +174,10 @@ interface JoinArgs {
   roomCode: string;
   focusMin?: number;
   breakMin?: number;
+  emoji?: string;
 }
 
-export function joinRoom({ name, roomCode, focusMin = 90, breakMin = 20 }: JoinArgs): Ant {
+export function joinRoom({ name, roomCode, focusMin = 90, breakMin = 20, emoji }: JoinArgs): Ant {
   const store = getStore();
   const room = getOrCreateRoom(roomCode);
   const now = Date.now();
@@ -181,6 +193,9 @@ export function joinRoom({ name, roomCode, focusMin = 90, breakMin = 20 }: JoinA
     remainingMs: null,
     joinedAt: now,
     lastSeen: now,
+    sessionMode: "focus",
+    pausedFrom: null,
+    emoji: emoji && emoji.trim() ? emoji.trim() : inferEmojiFromName(name),
   };
   store.ants.set(ant.id, ant);
   store.antsByRoom.get(room.code)!.add(ant.id);
@@ -216,6 +231,31 @@ export function leaveAnt(id: string): boolean {
   return true;
 }
 
+// Met à jour le mode social déclaré (focus / open / dnd). Donnée orthogonale
+// au timer (status) — sert juste à signaler aux autres antz si on est dispo
+// pour interrompre. Notify la room comme une action timer pour que les SSE
+// remontent immédiatement le changement.
+export function setSessionMode(id: string, mode: SessionMode): Ant | undefined {
+  const ant = getStore().ants.get(id);
+  if (!ant) return undefined;
+  ant.sessionMode = mode;
+  ant.lastSeen = Date.now();
+  notify(ant.roomCode);
+  return ant;
+}
+
+// Met à jour l'emoji animal de l'ant. Validation côté serveur via la liste
+// EMOJI_OPTIONS pour ne pas accepter n'importe quel input arbitraire.
+export function setEmoji(id: string, emoji: string): Ant | undefined {
+  const ant = getStore().ants.get(id);
+  if (!ant) return undefined;
+  if (!EMOJI_OPTIONS.includes(emoji)) return undefined;
+  ant.emoji = emoji;
+  ant.lastSeen = Date.now();
+  notify(ant.roomCode);
+  return ant;
+}
+
 // --- Actions sur le timer --------------------------------------------------
 
 type Action = "start" | "pause" | "resume" | "skip" | "reset";
@@ -239,20 +279,22 @@ export function applyAction(id: string, action: Action): Ant | undefined {
     case "pause": {
       if (ant.status !== "focus" && ant.status !== "break") break;
       ant.remainingMs = Math.max(0, (ant.currentPhaseEnd ?? now) - now);
-      // On garde le status précédent dans currentPhaseStart négatif ? Non, plus simple :
-      // on stocke le status pré-pause via une convention sur currentPhaseStart.
-      // On utilise un trick : le sign de currentPhaseStart distingue focus/break.
-      // -> pour rester lisible, on stocke le status via un champ dédié en pause :
-      ant.currentPhaseStart = ant.status === "focus" ? -1 : -2;
+      // On stocke le statut pré-pause dans son champ dédié (pausedFrom) et on
+      // PRÉSERVE currentPhaseStart pour conserver l'heure de début originale.
+      // currentPhaseEnd est mis à null car la fin théorique change quand on reprendra.
+      ant.pausedFrom = ant.status;
       ant.currentPhaseEnd = null;
       ant.status = "paused";
       break;
     }
     case "resume": {
       if (ant.status !== "paused" || ant.remainingMs == null) break;
-      const previousWasFocus = ant.currentPhaseStart === -1;
-      ant.status = previousWasFocus ? "focus" : "break";
-      ant.currentPhaseStart = now;
+      // On reprend la phase pré-pause (lue depuis pausedFrom). currentPhaseStart
+      // garde sa valeur d'origine — la session a TOUJOURS commencé à cette heure-là
+      // même si on a fait une pause au milieu. Ça permet à l'UI d'afficher "début 22:30"
+      // après une reprise sans mentir sur l'historique.
+      ant.status = ant.pausedFrom ?? "focus";
+      ant.pausedFrom = null;
       ant.currentPhaseEnd = now + ant.remainingMs;
       ant.remainingMs = null;
       break;
@@ -317,6 +359,9 @@ export function getRoomState(code: string): RoomState | undefined {
   for (const id of antIds) {
     const ant = store.ants.get(id);
     if (!ant) continue;
+    if (!ant.sessionMode) ant.sessionMode = "focus"; // migration HMR-safe (ancien ant sans le champ)
+    if ((ant as { pausedFrom?: AntStatus | null }).pausedFrom === undefined) ant.pausedFrom = null;  // idem pausedFrom
+    if (!ant.emoji) ant.emoji = inferEmojiFromName(ant.name) || DEFAULT_EMOJI;  // migration emoji
     if (now - ant.lastSeen > STALE_MS) {
       // soft-remove : on cache au client mais on garde l'objet pour reconnect rapide
       continue;

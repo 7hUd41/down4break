@@ -1,6 +1,13 @@
 // Statuts d'un ant. "idle" = créé/connecté mais pas encore lancé.
 export type AntStatus = "idle" | "focus" | "break" | "paused";
 
+// Mode social déclaré par l'utilisateur — orthogonal au timer (status).
+// Permet aux autres antz de savoir si on peut interrompre / discuter / pas du tout.
+//  - focus : par défaut, concentration normale
+//  - open  : session moins sérieuse, ouvert à la discussion
+//  - dnd   : ne pas déranger
+export type SessionMode = "focus" | "open" | "dnd";
+
 export interface Ant {
   id: string;            // UUID stable, stocké aussi côté client (cookie/localStorage).
   name: string;
@@ -14,8 +21,14 @@ export interface Ant {
   currentPhaseStart: number | null;  // ms epoch
   currentPhaseEnd: number | null;    // ms epoch
   remainingMs: number | null;        // utilisé uniquement quand paused
+  // Statut pré-pause ("focus" | "break") quand status="paused", null sinon.
+  // Permet de garder currentPhaseStart intact pendant et après une pause,
+  // pour pouvoir afficher l'heure de début originale dans l'UI.
+  pausedFrom: AntStatus | null;
+  emoji: string;
   joinedAt: number;
   lastSeen: number;
+  sessionMode: SessionMode;
 }
 
 export interface Room {

@@ -26,7 +26,7 @@ export async function createRoom(name?: string): Promise<Room> {
 
 export async function joinRoom(
   code: string,
-  args: { name: string; focusMin?: number; breakMin?: number }
+  args: { name: string; focusMin?: number; breakMin?: number; emoji?: string }
 ): Promise<Ant> {
   const res = await fetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
     method: "POST",
@@ -121,4 +121,24 @@ export async function listPublicRooms(): Promise<PublicRoom[]> {
   const res = await fetch("/api/rooms", { cache: "no-store" });
   const { rooms } = await asJson<{ rooms: PublicRoom[] }>(res);
   return rooms;
+}
+
+// Met à jour le mode social déclaré (focus / ouvert à la discussion / dnd).
+export async function setSessionMode(antId: string, mode: import("./types").SessionMode): Promise<void> {
+  await fetch(`/api/ants/${encodeURIComponent(antId)}/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+}
+
+// Met à jour l'emoji animal de l'ant. Échec silencieux côté client : si le
+// serveur refuse (emoji hors-liste), on ne fait rien — l'UI conserve la valeur
+// précédente affichée par la SSE.
+export async function setAntEmoji(antId: string, emoji: string): Promise<void> {
+  await fetch(`/api/ants/${encodeURIComponent(antId)}/emoji`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emoji }),
+  });
 }

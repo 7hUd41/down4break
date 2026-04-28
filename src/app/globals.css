@@ -8,9 +8,15 @@
   --accent-fg: #1a1a1a;
   --card: #ffffff;
   --border: #e7e5e0;
-  --focus: #16a34a;
-  --break: #f59e0b;
+  --focus: #2563eb;  /* blue-600 : concentration calme, force tranquille */
+  --break: #facc15;  /* yellow-400 : pause joyeuse, conviviale, lisible */
   --idle: #94a3b8;
+  /* Couleurs des "modes de session" — signal social déclaré, indépendant
+     du timer. Volontairement distinctes de --focus/--break pour ne pas
+     créer de confusion entre l'état du timer et le mode social. */
+  --mode-open:  #22c55e;  /* vert : ouvert à la discussion (sessions légères) */
+  --mode-focus: #f5b300;  /* jaune soleil : focus (sessions intenses) */
+  --mode-dnd:   #f97316;  /* orange dawn : ne pas déranger (sessions extrêmes) */
 }
 
 @theme inline {

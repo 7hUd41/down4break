@@ -2,19 +2,23 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { sendAction, sendHeartbeat, subscribeRoom, fetchRoomState } from "@/lib/api";
-import type { Ant, RoomState } from "@/lib/types";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, useRef } from "react";
+import { sendAction, sendHeartbeat, setSessionMode, subscribeRoom, fetchRoomState } from "@/lib/api";
+import { SESSION_MODE_OPTIONS, deriveSessionDisplay } from "@/lib/sessionDisplay";
+import type { Ant, RoomState, SessionMode } from "@/lib/types";
 import ShareButton from "@/components/ShareButton";
 
 interface Props {
   code: string;
   meId: string;          // id du ant local
   initialState?: RoomState;
-  onLeave?: () => void;  // appelé par le bouton "changer de pseudo"
+  // onLeave reçoit l'ant courant pour permettre au parent de pré-remplir
+  // le re-join form avec ses valeurs.
+  onLeave?: (ant: Ant) => void;  // bouton "modifier"
+  onExit?: () => void;           // bouton "quitter la room"
 }
 
-export default function RoomView({ code, meId, initialState, onLeave }: Props) {
+export default function RoomView({ code, meId, initialState, onLeave, onExit }: Props) {
   const [state, setState] = useState<RoomState | null>(initialState ?? null);
   const [now, setNow] = useState(() => Date.now());
   // Drift entre l'horloge serveur et celle du client (en ms). En state plutôt
@@ -99,9 +103,6 @@ export default function RoomView({ code, meId, initialState, onLeave }: Props) {
           </div>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <p className="text-xs text-muted">
-            {state.ants.length} {state.ants.length > 1 ? "antz" : "ant"}
-          </p>
           {shareUrl && (
             <ShareButton
               url={shareUrl}
@@ -109,35 +110,46 @@ export default function RoomView({ code, meId, initialState, onLeave }: Props) {
               text={`Rejoins-moi sur down4break? — code ${code}`}
             />
           )}
-          {onLeave && (
-            <button
-              type="button"
-              onClick={onLeave}
-              className="text-xs text-muted hover:text-foreground underline underline-offset-4 transition"
-              title="quitter et rejoindre sous un autre pseudo"
-            >
-              changer de pseudo
-            </button>
-          )}
+          <p className="text-xs text-muted">
+            {state.ants.length} {state.ants.length > 1 ? "antz" : "ant"}
+          </p>
         </div>
       </header>
 
-      {me && <MyTimer ant={me} serverNow={serverNow} />}
+      {me && <MyTimer ant={me} serverNow={serverNow} onEdit={onLeave ? () => onLeave(me) : undefined} />}
 
       <section>
-        <h2 className="text-sm uppercase tracking-wider text-muted mb-3">les autres</h2>
-        {others.length === 0 ? (
-          <p className="text-sm text-muted italic">
-            personne d&apos;autre dans la room. partage le code{" "}
-            <span className="font-mono">{code}</span>.
-          </p>
-        ) : (
-          <ul className="flex flex-col gap-2">
-            {others.map((a) => (
-              <AntRow key={a.id} ant={a} serverNow={serverNow} />
-            ))}
-          </ul>
-        )}
+        <h2 className="text-sm uppercase tracking-wider text-muted mb-3">la room</h2>
+        <ul className="flex flex-col gap-2">
+          {state.ants.map((a) => (
+            <AntRow
+              key={a.id}
+              ant={a}
+              serverNow={serverNow}
+              isMe={a.id === meId}
+            />
+          ))}
+        </ul>
+        {/* Footer de la liste : hint "personne d'autre" si seul (1ère ligne)
+            puis lien "quitter la room" en dessous (2e ligne). */}
+        <div className="mt-3 text-sm text-muted flex flex-col gap-2">
+          {others.length === 0 && (
+            <p className="italic">
+              personne d&apos;autre pour l&apos;instant. partage le code{" "}
+              <span className="font-mono">{code}</span>.
+            </p>
+          )}
+          {onExit && (
+            <button
+              type="button"
+              onClick={onExit}
+              className="self-start underline underline-offset-4 hover:text-foreground transition"
+              title="quitter cette room et revenir à l'accueil"
+            >
+              quitter la room
+            </button>
+          )}
+        </div>
       </section>
     </main>
   );
@@ -145,7 +157,7 @@ export default function RoomView({ code, meId, initialState, onLeave }: Props) {
 
 // --- mon timer -------------------------------------------------------------
 
-function MyTimer({ ant, serverNow }: { ant: Ant; serverNow: number }) {
+function MyTimer({ ant, serverNow, onEdit }: { ant: Ant; serverNow: number; onEdit?: () => void }) {
   const [busy, setBusy] = useState(false);
 
   async function act(action: "start" | "pause" | "resume" | "skip" | "reset") {
@@ -170,7 +182,11 @@ function MyTimer({ ant, serverNow }: { ant: Ant; serverNow: number }) {
 
   return (
     <section className="flex flex-col items-center gap-6 py-6">
-      <PhaseBadge status={phase} large />
+      <SessionModeChip
+        mode={ant.sessionMode}
+        status={phase}
+        onChange={(next) => { setSessionMode(ant.id, next).catch(() => {}); }}
+      />
       <div className="text-7xl sm:text-8xl font-mono tabular-nums tracking-tight">
         {fmt(remaining)}
       </div>
@@ -178,25 +194,53 @@ function MyTimer({ ant, serverNow }: { ant: Ant; serverNow: number }) {
 
       <div className="flex flex-wrap justify-center gap-2 mt-2">
         {phase === "idle" && (
-          <Btn onClick={() => act("start")} primary disabled={busy}>démarrer focus</Btn>
+          <Btn onClick={() => act("start")} primary disabled={busy}>démarrer session</Btn>
         )}
         {(phase === "focus" || phase === "break") && (
           <>
-            <Btn onClick={() => act("pause")} disabled={busy}>pause</Btn>
-            <Btn onClick={() => act("skip")} disabled={busy}>skip phase</Btn>
-            <Btn onClick={() => act("reset")} disabled={busy}>reset</Btn>
+            <IconBtn label="reset" onClick={() => act("reset")} disabled={busy}>
+              <ResetIcon />
+            </IconBtn>
+            <IconBtn label="break" onClick={() => act("pause")} disabled={busy}>
+              <PauseIcon />
+            </IconBtn>
+            <IconBtn label="phase suivante" onClick={() => act("skip")} disabled={busy}>
+              <NextIcon />
+            </IconBtn>
           </>
         )}
         {phase === "paused" && (
           <>
-            <Btn onClick={() => act("resume")} primary disabled={busy}>reprendre</Btn>
-            <Btn onClick={() => act("reset")} disabled={busy}>reset</Btn>
+            <IconBtn label="reset" onClick={() => act("reset")} disabled={busy}>
+              <ResetIcon />
+            </IconBtn>
+            <IconBtn label="reprendre" onClick={() => act("resume")} disabled={busy} primary>
+              <PlayIcon />
+            </IconBtn>
+            <IconBtn label="phase suivante" onClick={() => act("skip")} disabled={busy}>
+              <NextIcon />
+            </IconBtn>
           </>
         )}
       </div>
 
+      {/* Sous-texte : durées du cycle + lien "modifier" qui clear le ant
+          local et re-affiche le form de join (pseudo, emoji, durées, mode). */}
       <p className="text-xs text-muted">
-        {ant.focusMin} min focus · {ant.breakMin} min pause · {ant.name}
+        {ant.focusMin} min focus · {ant.breakMin} min break
+        {onEdit && (
+          <>
+          {' · '}
+            <button
+              type="button"
+              onClick={onEdit}
+              className="underline underline-offset-4 hover:text-foreground transition"
+              title="modifier pseudo, emoji ou durées"
+            >
+              modifier
+            </button>
+          </>
+        )}
       </p>
     </section>
   );
@@ -204,20 +248,122 @@ function MyTimer({ ant, serverNow }: { ant: Ant; serverNow: number }) {
 
 // --- ligne pour chaque autre ant -------------------------------------------
 
-function AntRow({ ant, serverNow }: { ant: Ant; serverNow: number }) {
+// isMe : ligne mise en avant (bordure accent + fond très léger + chip "toi").
+// Cliquer sur la row toggle un panneau qui détaille le timing : restant en
+// format humain (1h 28 min), heure de début et heure de fin de la phase.
+function AntRow({
+  ant,
+  serverNow,
+  isMe = false,
+}: {
+  ant: Ant;
+  serverNow: number;
+  isMe?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
   const remaining = computeRemainingMs(ant, serverNow);
+  // L'expand n'a du sens que si une phase est en cours ou en pause — sinon
+  // rien à montrer. On laisse quand même la row cliquable pour rester cohérent.
+  const hasTimingInfo = ant.status !== "idle";
+
   return (
-    <li className="flex items-center gap-4 px-4 py-3 rounded-xl border border-border bg-card">
-      <PhaseDot status={ant.status} />
-      <div className="flex-1 min-w-0">
-        <p className="font-medium truncate">{ant.name}</p>
-        <p className="text-xs text-muted">{phaseLabel(ant.status)}</p>
-      </div>
-      {ant.status !== "idle" && (
-        <div className="font-mono text-lg tabular-nums">{fmt(remaining)}</div>
+    <li
+      className={
+        "rounded-xl border transition " +
+        (isMe ? "border-accent bg-accent/5" : "border-border bg-card")
+      }
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        className="w-full flex items-center gap-3 px-4 py-3 text-left"
+      >
+        <span className="text-2xl shrink-0" aria-hidden>{ant.emoji}</span>
+        <div className="min-w-0 max-w-[12rem] sm:max-w-[16rem]">
+          <div className="flex items-center gap-2">
+            <p className="font-medium truncate">{ant.name}</p>
+            {isMe && (
+              <span className="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-accent text-accent-fg font-bold">
+                toi
+              </span>
+            )}
+          </div>
+          {(() => {
+            const d = deriveSessionDisplay(ant.sessionMode, ant.status);
+            return (
+              <p className="text-xs text-muted flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: d.color }} aria-hidden />
+                {d.label}
+              </p>
+            );
+          })()}
+        </div>
+        {/* Barre de progression double : focus + pause, largeur proportionnelle
+            à focusMin/breakMin. Cachée sur très petit écran pour ne pas
+            écraser le pseudo et le timer. */}
+        <div className="hidden sm:block flex-1 mx-3 min-w-[3rem]">
+          <DualProgressBar ant={ant} serverNow={serverNow} />
+        </div>
+        {ant.status !== "idle" && (
+          <div className="font-mono text-lg tabular-nums shrink-0 ml-auto sm:ml-0">{fmt(remaining)}</div>
+        )}
+      </button>
+
+      {expanded && hasTimingInfo && (
+        <div className="px-4 pb-3 -mt-1 grid grid-cols-3 gap-3 text-center text-xs">
+          <Detail label="début" value={fmtClock(phaseStartTs(ant))} />
+          <Detail label="restant" value={fmtHumanDuration(remaining)} />
+          <Detail label="fin" value={fmtClock(phaseEndTs(ant, serverNow))} />
+        </div>
       )}
     </li>
   );
+}
+
+function Detail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg bg-border/30 py-2 px-2">
+      <p className="text-[10px] uppercase tracking-wider text-muted">{label}</p>
+      <p className="font-mono tabular-nums text-sm mt-0.5">{value}</p>
+    </div>
+  );
+}
+
+// Heure de début de la phase courante. On la garde même si la phase est en
+// pause — la session a commencé à cet instant, le pause n'invalide pas l'info.
+// La fin par contre est recalculée (cf. phaseEndTs) puisqu'elle se décale.
+function phaseStartTs(ant: Ant): number | null {
+  if (ant.status === "focus" || ant.status === "break" || ant.status === "paused") {
+    return ant.currentPhaseStart;
+  }
+  return null;
+}
+function phaseEndTs(ant: Ant, serverNow: number): number | null {
+  if (ant.status === "focus" || ant.status === "break") return ant.currentPhaseEnd;
+  if (ant.status === "paused" && ant.remainingMs != null) {
+    // Pour un ant en pause, on projette l'heure de fin théorique = maintenant + restant.
+    return serverNow + ant.remainingMs;
+  }
+  return null;
+}
+
+// Format ms → "1h 28 min" / "45 min" / "30 s". Lisible plutôt que "01:28:00".
+function fmtHumanDuration(ms: number): string {
+  if (ms < 0) ms = 0;
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return `${totalSec} s`;
+  const totalMin = Math.round(totalSec / 60);
+  if (totalMin < 60) return `${totalMin} min`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? `${h}h` : `${h}h ${m} min`;
+}
+
+// Format ts ms → "14:32" en locale FR. null → "—".
+function fmtClock(ts: number | null): string {
+  if (ts == null) return "—";
+  return new Date(ts).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 }
 
 // --- helpers UI ------------------------------------------------------------
@@ -249,30 +395,166 @@ function Btn({
   );
 }
 
-function PhaseBadge({ status, large }: { status: Ant["status"]; large?: boolean }) {
-  const { color, label } = phaseStyle(status);
+// --- chip dropdown : mode social déclaré -----------------------------------
+// Indépendant du timer (status). Permet à l'utilisateur de signaler aux autres
+// "je suis en focus / ouvert à la discussion / ne pas déranger". Stocké côté
+// serveur via setSessionMode et propagé via SSE.
+
+function SessionModeChip({
+  mode,
+  status,
+  onChange,
+}: {
+  mode: SessionMode;
+  status: Ant["status"];
+  onChange: (next: SessionMode) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Click-outside pour fermer le menu — pattern classique, rien d'exotique.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const baseOption = SESSION_MODE_OPTIONS.find((o) => o.key === mode) ?? SESSION_MODE_OPTIONS[0];
+  // Source unique de vérité pour le label/color affiché — partagé avec les rows.
+  const derived = deriveSessionDisplay(mode, status);
+  const current = { ...baseOption, label: derived.label, color: derived.color };
+  // Le dropdown est désactivé quand le label est imposé par le timer (Pause /
+  // Interrupted) — pas pertinent de changer son mode social à ces moments.
+  const locked = status === "break" || status === "paused";
+
   return (
-    <span
-      className={
-        "inline-flex items-center gap-2 px-3 py-1 rounded-full border " +
-        (large ? "text-sm" : "text-xs")
-      }
-      style={{ borderColor: color, color }}
-    >
-      <span className="w-2 h-2 rounded-full" style={{ background: color }} />
-      {label}
-    </span>
+    <div ref={ref} className="relative">
+      {/* Quand le timer impose le label (Pause / Interrupted), on locke le
+          dropdown : pas de menu ouvrable, pas de caret. Le mode social n'a
+          pas de sens à ce moment, le label affiché vient du timer. */}
+      <button
+        type="button"
+        onClick={() => { if (!locked) setOpen((o) => !o); }}
+        disabled={locked}
+        aria-haspopup={locked ? undefined : "listbox"}
+        aria-expanded={locked ? undefined : open}
+        className={
+          "inline-flex items-center gap-2 px-3 py-1 rounded-full border border-border bg-card text-sm transition " +
+          (locked ? "cursor-default" : "hover:border-accent")
+        }
+      >
+        <span className="w-2 h-2 rounded-full" style={{ background: current.color }} aria-hidden />
+        {current.label}
+        {!locked && <span className="text-muted text-xs">▾</span>}
+      </button>
+      {open && (
+        <ul
+          role="listbox"
+          className="absolute z-10 mt-2 left-0 min-w-[14rem] rounded-xl border border-border bg-card shadow-lg p-1"
+        >
+          {SESSION_MODE_OPTIONS.map((o) => {
+            const active = o.key === mode;
+            return (
+              <li key={o.key}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onClick={() => { onChange(o.key); setOpen(false); }}
+                  className={
+                    "w-full flex items-start gap-3 px-3 py-2 rounded-lg text-left transition " +
+                    (active ? "bg-border/40" : "hover:bg-border/30")
+                  }
+                >
+                  <span
+                    className="w-2 h-2 rounded-full mt-1.5 shrink-0"
+                    style={{ background: o.color }}
+                    aria-hidden
+                  />
+                  <div className="min-w-0">
+                    <p className={"text-sm " + (active ? "font-medium" : "")}>{o.label}</p>
+                    <p className="text-xs text-muted">{o.hint}</p>
+                  </div>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 
-function PhaseDot({ status }: { status: Ant["status"] }) {
-  const { color } = phaseStyle(status);
+// --- icônes inline pour les boutons d'action ------------------------------
+// SVG inline (pas de dépendance lucide-react à ajouter pour 4 icônes).
+
+function IconBtn({
+  children,
+  onClick,
+  label,
+  primary,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  label: string;
+  primary?: boolean;
+  disabled?: boolean;
+}) {
   return (
-    <span
-      className="w-3 h-3 rounded-full shrink-0"
-      style={{ background: color }}
-      aria-label={status}
-    />
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className={
+        "w-11 h-11 inline-flex items-center justify-center rounded-full transition disabled:opacity-40 " +
+        (primary
+          ? "bg-foreground text-background hover:opacity-90"
+          : "border border-border bg-card hover:border-accent")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function ResetIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 12a9 9 0 1 0 3-6.7" />
+      <polyline points="3 4 3 10 9 10" />
+    </svg>
+  );
+}
+
+function PauseIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <rect x="6" y="5" width="4" height="14" rx="1" />
+      <rect x="14" y="5" width="4" height="14" rx="1" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M7 5l12 7-12 7V5z" />
+    </svg>
+  );
+}
+
+function NextIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M5 5l10 7-10 7V5z" />
+      <rect x="16" y="5" width="3" height="14" rx="1" />
+    </svg>
   );
 }
 
@@ -291,16 +573,92 @@ function ProgressBar({ progress, status }: { progress: number; status: Ant["stat
 function phaseStyle(status: Ant["status"]): { color: string; label: string } {
   switch (status) {
     case "focus": return { color: "var(--focus)", label: "focus" };
-    case "break": return { color: "var(--break)", label: "pause" };
-    case "paused": return { color: "var(--muted)", label: "en pause" };
+    case "break": return { color: "var(--break)", label: "break" };
+    case "paused": return { color: "var(--muted)", label: "en break" };
     case "idle":
     default:      return { color: "var(--idle)", label: "en attente" };
   }
 }
 
-function phaseLabel(s: Ant["status"]): string {
-  return phaseStyle(s).label;
+
+// --- barre de progression double (focus | pause) ---------------------------
+// Deux segments collés, largeurs proportionnelles à focusMin/breakMin.
+// Le segment focus se remplit pendant la phase focus (ou paused-from-focus),
+// est plein quand on passe en break ; le segment pause se remplit pendant la
+// phase break (ou paused-from-break). Donne une vue d'ensemble du cycle.
+
+function DualProgressBar({ ant, serverNow }: { ant: Ant; serverNow: number }) {
+  const total = ant.focusMin + ant.breakMin;
+  const focusFlex = ant.focusMin / total;
+  const breakFlex = ant.breakMin / total;
+  const fp = focusProgress(ant, serverNow);
+  const bp = breakProgress(ant, serverNow);
+  return (
+    <div className="flex h-2 w-full rounded-full overflow-hidden border border-border">
+      <div
+        className="relative"
+        style={{
+          flexGrow: focusFlex,
+          flexBasis: 0,
+          // Fond = couleur de la phase à 18% d'opacité (color-mix). Donne
+          // un teint léger qui prévisualise la couleur du fill, plutôt que
+          // le gris uniforme — chaque segment garde son identité visuelle.
+          background: "color-mix(in oklab, var(--focus) 18%, transparent)",
+        }}
+        aria-label={`focus ${Math.round(fp * 100)}%`}
+      >
+        <div
+          className="absolute inset-y-0 left-0 transition-all duration-500"
+          style={{ width: `${fp * 100}%`, background: "var(--focus)" }}
+        />
+      </div>
+      <div
+        className="relative"
+        style={{
+          flexGrow: breakFlex,
+          flexBasis: 0,
+          background: "color-mix(in oklab, var(--break) 18%, transparent)",
+        }}
+        aria-label={`break ${Math.round(bp * 100)}%`}
+      >
+        <div
+          className="absolute inset-y-0 left-0 transition-all duration-500"
+          style={{ width: `${bp * 100}%`, background: "var(--break)" }}
+        />
+      </div>
+    </div>
+  );
 }
+
+function focusProgress(ant: Ant, serverNow: number): number {
+  const total = ant.focusMin * 60_000;
+  if (total <= 0) return 0;
+  if (ant.status === "focus") {
+    if (!ant.currentPhaseEnd) return 0;
+    return clamp01((total - Math.max(0, ant.currentPhaseEnd - serverNow)) / total);
+  }
+  if (ant.status === "break") return 1; // focus terminé, on est passé à la pause
+  if (ant.status === "paused" && ant.pausedFrom === "focus" && ant.remainingMs != null) {
+    return clamp01((total - ant.remainingMs) / total);
+  }
+  if (ant.status === "paused" && ant.pausedFrom === "break") return 1;
+  return 0; // idle
+}
+
+function breakProgress(ant: Ant, serverNow: number): number {
+  const total = ant.breakMin * 60_000;
+  if (total <= 0) return 0;
+  if (ant.status === "break") {
+    if (!ant.currentPhaseEnd) return 0;
+    return clamp01((total - Math.max(0, ant.currentPhaseEnd - serverNow)) / total);
+  }
+  if (ant.status === "paused" && ant.pausedFrom === "break" && ant.remainingMs != null) {
+    return clamp01((total - ant.remainingMs) / total);
+  }
+  return 0; // idle, focus, paused-from-focus → la pause n'est pas commencée
+}
+
+function clamp01(x: number): number { return Math.max(0, Math.min(1, x)); }
 
 // --- temps -----------------------------------------------------------------
 

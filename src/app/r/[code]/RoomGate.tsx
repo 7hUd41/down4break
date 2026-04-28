@@ -13,6 +13,7 @@
 // effacé du localStorage).
 
 import { useCallback, useState, useSyncExternalStore } from "react";
+import { useRouter } from "next/navigation";
 import RoomView from "@/components/RoomView";
 import JoinRoomForm from "@/components/JoinRoomForm";
 import { leaveAnt } from "@/lib/api";
@@ -25,8 +26,13 @@ function noopSubscribe(): () => void {
 }
 
 export default function RoomGate({ code }: { code: string }) {
+  const router = useRouter();
   const [overrideId, setOverrideId] = useState<string | null>(null);
   const [forcedOut, setForcedOut] = useState(false);
+  // Snapshot de l'ant capturé au clic "modifier" pour pré-remplir le re-join form.
+  const [editDefaults, setEditDefaults] = useState<
+    { name: string; emoji: string; focusMin: number; breakMin: number } | null
+  >(null);
 
   const getStoredId = useCallback((): string | null => {
     try {
@@ -52,12 +58,21 @@ export default function RoomGate({ code }: { code: string }) {
     }
     setForcedOut(false);
     setOverrideId(ant.id);
+    setEditDefaults(null); // l'utilisateur a re-joiné, on oublie le snapshot précédent
   }
 
-  async function onLeave(currentId: string) {
+  async function onLeave(currentId: string, currentAnt: Ant) {
+    // Capture des valeurs courantes avant de wipe → permet de pré-remplir
+    // le re-join form (pseudo, emoji, durées). Sans ça, on regénérerait du
+    // random et l'utilisateur perdrait son identité visuelle de la session.
+    setEditDefaults({
+      name: currentAnt.name,
+      emoji: currentAnt.emoji,
+      focusMin: currentAnt.focusMin,
+      breakMin: currentAnt.breakMin,
+    });
     // Best-effort backend : on supprime l'ant côté serveur (permet aux autres
-    // de voir sa disparition immédiate via SSE plutôt que d'attendre la purge
-    // de 60s). Si le call échoue on continue, l'ant disparaîtra naturellement.
+    // de voir sa disparition immédiate via SSE plutôt que d'attendre la purge de 60s).
     leaveAnt(currentId).catch(() => {});
     try {
       localStorage.removeItem(storageKey(code));
@@ -68,9 +83,24 @@ export default function RoomGate({ code }: { code: string }) {
     setForcedOut(true);
   }
 
-  if (!antId) {
-    return <JoinRoomForm code={code} onJoined={onJoined} />;
+  // onExit : comme onLeave mais redirige vers la home au lieu de re-afficher
+  // le form. Utilisé par le bouton "quitter la room" du header de RoomView.
+  async function onExit(currentId: string) {
+    leaveAnt(currentId).catch(() => {});
+    try { localStorage.removeItem(storageKey(code)); } catch { /* private mode */ }
+    router.push("/");
   }
 
-  return <RoomView code={code} meId={antId} onLeave={() => onLeave(antId)} />;
+  if (!antId) {
+    return <JoinRoomForm code={code} onJoined={onJoined} initial={editDefaults ?? undefined} />;
+  }
+
+  return (
+    <RoomView
+      code={code}
+      meId={antId}
+      onLeave={(ant) => onLeave(antId, ant)}
+      onExit={() => onExit(antId)}
+    />
+  );
 }
