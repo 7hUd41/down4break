@@ -310,6 +310,12 @@ function AntRow({
         )}
       </button>
 
+      {/* Mobile : la barre passe sur sa propre ligne sous la row pour ne
+          pas écraser pseudo/timer. Cachée dès sm où elle redevient inline. */}
+      <div className="sm:hidden px-4 pb-3">
+        <DualProgressBar ant={ant} serverNow={serverNow} />
+      </div>
+
       {expanded && hasTimingInfo && (
         <div className="px-4 pb-3 -mt-1 grid grid-cols-3 gap-3 text-center text-xs">
           <Detail label="début" value={fmtClock(phaseStartTs(ant))} />

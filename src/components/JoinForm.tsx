@@ -65,7 +65,7 @@ export default function JoinForm() {
           ref={inputRef}
           type="text"
           inputMode="text"
-          placeholder="NOM DE TA ROOM"
+          placeholder="Nom de la room"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           maxLength={60}
@@ -87,11 +87,11 @@ export default function JoinForm() {
         disabled={submitDisabled}
         className="px-5 py-4 rounded-xl bg-foreground text-background font-medium text-lg disabled:opacity-40 hover:opacity-90 transition"
       >
-        {busy ? "…" : "rejoindre"}
+        {busy ? "…" : "Rejoindre"}
       </button>
 
       <p className="text-xs text-muted/70 text-center">
-        rejoint la room si elle existe, en crée une sinon.
+        Rejoins la room si elle existe, sinon crée-là !
       </p>
 
       {err && <p className="text-sm text-red-500 text-center">{err}</p>}

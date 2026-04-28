@@ -13,7 +13,7 @@ import DurationSlider from "@/components/DurationSlider";
 import { fetchRoomState, joinRoom } from "@/lib/api";
 import { generatePseudo } from "@/lib/pseudo";
 import { inferEmojiFromName, EMOJI_OPTIONS, DEFAULT_EMOJI } from "@/lib/emoji";
-import { deriveSessionDisplay } from "@/lib/sessionDisplay";
+import AntRow from "@/components/AntRow";
 import type { Ant } from "@/lib/types";
 
 interface Props {
@@ -245,7 +245,7 @@ function AntsPreview({
       ) : (
         <ul className="flex flex-col gap-2">
           {ants.map((a) => (
-            <AntRow key={a.id} ant={a} estServerNow={estServerNow} />
+            <AntRow key={a.id} ant={a} serverNow={estServerNow} />
           ))}
         </ul>
       )}
@@ -253,47 +253,9 @@ function AntsPreview({
   );
 }
 
-function AntRow({ ant, estServerNow }: { ant: Ant; estServerNow: number }) {
-  const remMs = computeRemainingMs(ant, estServerNow);
-  const showTimer = ant.status === "focus" || ant.status === "break" || ant.status === "paused";
-  const display = deriveSessionDisplay(ant.sessionMode, ant.status);
-
-  return (
-    <li className="flex items-center gap-3 px-3 py-2 rounded-xl border border-border bg-card">
-      <span className="text-2xl shrink-0" aria-hidden>{ant.emoji}</span>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium truncate">{ant.name}</p>
-        <p className="text-xs text-muted flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: display.color }} aria-hidden />
-          {display.label}
-        </p>
-      </div>
-      {showTimer && (
-        <span className="text-sm font-mono tabular-nums shrink-0">
-          {fmtRemaining(remMs)}
-        </span>
-      )}
-    </li>
-  );
-}
 
 
-// Reproduit la logique de RoomView.computeRemainingMs : pour idle on montre
-// la durée pleine du focus, pour paused on montre le restant figé, sinon on
-// recalcule depuis currentPhaseEnd avec l'horloge serveur estimée.
-function computeRemainingMs(ant: Ant, estServerNow: number): number {
-  if (ant.status === "paused") return ant.remainingMs ?? 0;
-  if (ant.status === "idle") return ant.focusMin * 60_000;
-  if (!ant.currentPhaseEnd) return 0;
-  return Math.max(0, ant.currentPhaseEnd - estServerNow);
-}
 
-function fmtRemaining(ms: number): string {
-  const total = Math.round(ms / 1000);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-}
 
 
 // --- picker d'emoji animal -------------------------------------------------

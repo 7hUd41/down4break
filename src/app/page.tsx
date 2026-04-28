@@ -37,6 +37,10 @@ export default function Home() {
         <JoinForm />
       </section>
 
+      {/* Rooms publiques actives — sous le formulaire pour donner envie
+          de rejoindre quelqu'un avant même de lire le pitch. Masqué si vide. */}
+      <RoomBrowser />
+
       {/* 4. Subtitles + intro */}
       <section className="w-full max-w-md mt-16 flex flex-col items-center gap-3 text-center">
         <div className="space-y-1">
@@ -58,10 +62,7 @@ export default function Home() {
         <Step n={3} title="focus ensemble" body="Chacun voit où en sont les autres. Pas de notif intrusive, juste de la visibilité." />
       </section>
 
-      {/* 6. Rooms publiques actives — n'affiche rien si vide */}
-      <RoomBrowser />
-
-      {/* 7. Footer */}
+      {/* Footer */}
       <footer className="mt-24 text-xs text-muted/70 text-center max-w-md">
         MVP — données stockées en mémoire, perdues si le service redémarre.
         Pas de tracking, pas de compte, pas de publicité.
